@@ -1,6 +1,54 @@
 #!/usr/bin/env python3
 # coding: utf-8
 
+"""
+Author:
+    Wenhan Tan (wenhan.johnson.tan@hotmail.com)
+Date:
+    2021/9
+
+Description:
+    This script splits each slide into patches and classify each patch using
+    5 trained models (4 for decision flow & 1 for multi-class). Each patch gets
+    a label and a probability value or magnitude. These classification results
+    are saved in a csv file like an example below:
+        ______________________________________________________________
+        |________|**Decision Flow Result***|****Multi-class Result***|
+        |________|***Label***|*Probability*|***Label***|*Probability*|
+        ______________________________________________________________
+        |SLIDE 1_|__1__|__0__|_0.95_|_0.87_|__3__|__0__|_0.76_|_0.97_| <- START
+
+    This script was used to generate 3 csv files for training set, testing set,
+    and validation set (by changing test_slideFolders.csv to train_slideFolders
+    and validation_slideFolders.csv). The 3 csv files will be used in another
+    script (Output_quadratic_kappa.py) for calculating quadratic weighted kappa.
+
+Input:
+    Provided by Radboud:
+        1) Radboud slides ("images_path")
+    Provided by this work:
+        1) new_train.csv (cleaned Radboud data, from script *Clean_data.py*)
+        2) test_slideFolders.csv (from script *Train_test_validation_split.py*)
+        3) 5 trained models weights (4 for decision flow & 1 for multi-class,
+        from script *Train.py*)
+
+Output:
+    1) A csv file with classification results
+       (exmaple filename: test_slideFolders_classification.csv)
+
+Usage:
+    To reproduce results, simply run this script in terminal. Make sure you
+    have all the python packages and input files ready.
+
+    To use it on a different dataset, there are 2 ways:
+        1) Download the trained weights from GitHub and use them in your code.
+        2) Go through all the input files and make sure you have them in the 
+           same format for your dataset. Change both input and output filepath
+           based on your file locations.
+"""
+
+# Remember to download and install "openslide"
+# "ctypes" is imported for using "openslide" if "...cannot find library..." shows up
 import ctypes
 from ctypes.util import find_library
 _lib = ctypes.cdll.LoadLibrary(find_library("./openslide-win64-20171122/bin/libopenslide-0.dll"))
@@ -8,64 +56,76 @@ import openslide
 from openslide import deepzoom
 import os
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, applications
-from tqdm import trange, tqdm
+from tqdm import trange
 import csv
 
 """
-Set up GPU
+Set GPU memory limit (Change the limit based on your GPU)
 """
-# tf.compat.v1.disable_eager_execution()
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
     try:
         tf.config.experimental.set_virtual_device_configuration(
             gpus[0],
+            # Memory limit is 4.5G (RTX 2060 max is 6G)
             [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=4608)]
         )
     except RuntimeError as e:
         print(e)
 
-################################## GLOBAL ###############################
+"""
+Filepath
+"""
+# Path for "new_train.csv", cleaned data
+# Provided by this work
+new_train_info_path = "./prostate-cancer-grade-assessment/new_train.csv"
 
-# new_train_info_path = "./prostate-cancer-grade-assessment/new_train.csv"
-# new_test_info_path = "./prostate-cancer-grade-assessment/new_test.csv"
-# info_path = "./prostate-cancer-grade-assessment/train.csv"
-# images_path = "./prostate-cancer-grade-assessment/train_images/"
-# masks_path = "./prostate-cancer-grade-assessment/train_label_masks/"
+# Path for H&E
+# Provided by Radboud
+images_path = "./prostate-cancer-grade-assessment/train_images/"
 
-# image_format = ".tiff"
-# mask_format = "_mask.tiff"
+# Path for slideFolders
+# Provided by this work
+test_slideFolders_path = "./prostate-cancer-grade-assessment/test_slideFolders.csv"
 
-# image_id = np.genfromtxt(info_path, delimiter=",", dtype='str',\
-#                          skip_header=1, usecols=0)
-# mask_id = np.char.add(image_id, mask_format)
-# image_id = np.char.add(image_id, image_format)
+# Path for 5 trained models weights
+# Provided by this work
+checkpoint_filepath_1v = "./model_result/2021_01_21_22_44_16/checkpoint/"
+checkpoint_filepath_2v = "./model_result/2021_01_22_22_08_24/checkpoint/"
+checkpoint_filepath_3v = "./model_result/2021_01_23_18_59_44/checkpoint/"
+checkpoint_filepath_4v = "./model_result/2021_02_12_22_24_50/checkpoint/"
+checkpoint_filepath_MC = "./model_result/2021_02_14_21_02_23/checkpoint/"
 
-# image_info = np.genfromtxt(info_path, delimiter=",", dtype='str',\
-#                          skip_header=1, usecols=(1,2,3))
+# Path for output file
+output_path = "./prostate-cancer-grade-assessment/test_slideFolders_classification.csv"
 
-# cmap1 = mpl.colors.ListedColormap(['black', 'gray', 'green', 'yellow', 'orange', 'red'])
-# cmap2 = mpl.colors.ListedColormap(['black', 'gray', 'red'])
-
-# train_image_id = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=0)
-# train_mask_id = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=1)
-# train_image_info = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=(2,3,4))
-# test_image_id = np.genfromtxt(new_test_info_path, delimiter=",", dtype='str', usecols=0)
-# test_mask_id = np.genfromtxt(new_test_info_path, delimiter=",", dtype='str', usecols=1)
-# test_image_info = np.genfromtxt(new_test_info_path, delimiter=",", dtype='str', usecols=(2,3,4))
+"""
+Read in csv files
+"""
+print("Reading in data")
+train_image_id = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=0)
+train_image_fullInfo = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=(0, 1, 2, 3, 4))
+test_slideFolders = np.genfromtxt(test_slideFolders_path, delimiter=",", dtype='str', usecols=0)
 
 """
 Reconstruct model
 """
 def reconstruct_model(checkpoint_filepath, ifMC):
+    """
+    This function reconstruct models with input trained models. The model is
+    DenseNet 201 + DropOut layer. If it is a multi-class model, there are 5
+    nodes at the softmax layer. If it is a decision flow model, there are only 2
+    nodes at the softmax layer. Trained model is then returned.
+    """
+
+    # Use DenseNet 201
     denseNet = applications.DenseNet201(include_top=False, weights=None, input_shape=(128, 128, 3),  pooling='avg')
 
     output = denseNet.output
-    output = layers.Dropout(0.5)(output)
+    output = layers.Dropout(0.5)(output) # Add Dropout layer
     if ifMC == 0:
         output = layers.Dense(2, activation='softmax')(output)
     elif ifMC == 1:
@@ -79,150 +139,124 @@ def reconstruct_model(checkpoint_filepath, ifMC):
     model.compile(optimizer=opt,
                  loss=loss,
                  metrics=['accuracy','AUC'])
-    model.load_weights(checkpoint_filepath)
+    model.load_weights(checkpoint_filepath) # Load trained weights
     return model
 
 """
-Model 1v setup
+Model 1v setup / 1st decision flow model
 """
-print("Setting up model 1v")
-checkpoint_filepath_1v = "./model_result/2021_01_21_22_44_16/checkpoint/"
-# checkpoint_filepath_1v = "./model_result/2021_03_23_22_21_32/checkpoint/"
+print("Setting up model 1 decision flow")
 model_1v = reconstruct_model(checkpoint_filepath_1v, 0)
 
 """
-Model 2v setup
+Model 2v setup / 2nd decision flow model
 """
-print("Setting up model 2v")
-checkpoint_filepath_2v = "./model_result/2021_01_22_22_08_24/checkpoint/"
-# checkpoint_filepath_2v = "./model_result/2021_03_24_20_58_22/checkpoint/"
+print("Setting up model 2 decision flow")
 model_2v = reconstruct_model(checkpoint_filepath_2v, 0)
 
 """
-Model 3v setup
+Model 3v setup / 3rd decision flow model
 """
-print("Setting up model 3v")
-checkpoint_filepath_3v = "./model_result/2021_01_23_18_59_44/checkpoint/"
-# checkpoint_filepath_3v = "./model_result/2021_03_25_21_10_05/checkpoint/"
+print("Setting up model 3 decision flow")
 model_3v = reconstruct_model(checkpoint_filepath_3v, 0)
 
 """
-Model 4v setup
+Model 4v setup / 4th decision flow model
 """
-print("Setting up model 4v")
-checkpoint_filepath_4v = "./model_result/2021_02_12_22_24_50/checkpoint/"
-# checkpoint_filepath_4v = "./model_result/2021_03_26_21_11_33/checkpoint/"
+print("Setting up model 4 decision flow")
 model_4v = reconstruct_model(checkpoint_filepath_4v, 0)
 
 """
-Model Multi-Class setup
+Model Multi-Class setup / multi-class model
 """
-print("Setting up model MC")
-checkpoint_filepath_MC = "./model_result/2021_02_14_21_02_23/checkpoint/"
-# checkpoint_filepath_MC = "./model_result/2021_03_22_23_04_31/checkpoint/"
+print("Setting up model multi-class")
 model_MC = reconstruct_model(checkpoint_filepath_MC, 1)
 
 """
-DT inference
+This function takes in x data and outputs y data with probabilities for
+decision flow method
 """
-def DT(x_test):
+def DF(x_test):
     temp = model_1v.predict(x_test)
-    yhat_DT = np.argmax(temp, axis=1)
-    yhat_DT_magnitude = np.max(temp, axis=1)
+    yhat_DF = np.argmax(temp, axis=1)
+    yhat_DF_magnitude = np.max(temp, axis=1)
     
-    if (yhat_DT == 1).sum() > 0:
-        temp = model_2v.predict(x_test[yhat_DT == 1])
+    if (yhat_DF == 1).sum() > 0:
+        temp = model_2v.predict(x_test[yhat_DF == 1])
         yhat_temp = np.argmax(temp, axis=1)
         count = 0
-        for idx in range(len(yhat_DT)):
-            if yhat_DT[idx] == 1:
+        for idx in range(len(yhat_DF)):
+            if yhat_DF[idx] == 1:
                 if yhat_temp[count] == 0:
-                    yhat_DT[idx] = 1
+                    yhat_DF[idx] = 1
                 else:
-                    yhat_DT[idx] = 2
-                yhat_DT_magnitude[idx] = np.max(temp, axis=1)[count]
+                    yhat_DF[idx] = 2
+                yhat_DF_magnitude[idx] = np.max(temp, axis=1)[count]
                 count += 1
 
-    if (yhat_DT == 2).sum() > 0:
-        temp = model_3v.predict(x_test[yhat_DT == 2])
+    if (yhat_DF == 2).sum() > 0:
+        temp = model_3v.predict(x_test[yhat_DF == 2])
         yhat_temp = np.argmax(temp, axis=1)
         count = 0
-        for idx in range(len(yhat_DT)):
-            if yhat_DT[idx] == 2:
+        for idx in range(len(yhat_DF)):
+            if yhat_DF[idx] == 2:
                 if yhat_temp[count] == 0:
-                    yhat_DT[idx] = 2
+                    yhat_DF[idx] = 2
                 else:
-                    yhat_DT[idx] = 3
-                yhat_DT_magnitude[idx] = np.max(temp, axis=1)[count]
+                    yhat_DF[idx] = 3
+                yhat_DF_magnitude[idx] = np.max(temp, axis=1)[count]
                 count += 1
     
-    if (yhat_DT == 3).sum() > 0:
-        temp = model_4v.predict(x_test[yhat_DT == 3])
+    if (yhat_DF == 3).sum() > 0:
+        temp = model_4v.predict(x_test[yhat_DF == 3])
         yhat_temp = np.argmax(temp, axis=1)
         count = 0
-        for idx in range(len(yhat_DT)):
-            if yhat_DT[idx] == 3:
+        for idx in range(len(yhat_DF)):
+            if yhat_DF[idx] == 3:
                 if yhat_temp[count] == 0:
-                    yhat_DT[idx] = 3
+                    yhat_DF[idx] = 3
                 else:
-                    yhat_DT[idx] = 4
-                yhat_DT_magnitude[idx] = np.max(temp, axis=1)[count]
+                    yhat_DF[idx] = 4
+                yhat_DF_magnitude[idx] = np.max(temp, axis=1)[count]
                 count += 1
                 
-    return yhat_DT, yhat_DT_magnitude
+    return yhat_DF, yhat_DF_magnitude
 
 """
-MC inference
+This function takes in x data and outputs y data with probabilities for
+multi-class method
 """
 def MC(x_test):
     temp = model_MC.predict(x_test)
     yhat_MC = np.argmax(temp, axis=1)
-    yhat_DT_magnitude = np.max(temp, axis=1)
-    return yhat_MC, yhat_DT_magnitude
+    yhat_DF_magnitude = np.max(temp, axis=1)
+    return yhat_MC, yhat_DF_magnitude
 
 """
+MAIN CODE:
 Save slidefolders classification result
 """
-# new_train_info_path = "./prostate-cancer-grade-assessment/new_train.csv"
-new_train_info_path = "./prostate-cancer-grade-assessment/new_test_kaggle_remove_ka.csv"
-images_path = "./prostate-cancer-grade-assessment/train_images/"
-masks_path = "./prostate-cancer-grade-assessment/train_label_masks/"
+print("Saving classification result")
 
-train_image_id = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=0)
-train_image_mask_id = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=1)
-train_image_fullInfo = np.genfromtxt(new_train_info_path, delimiter=",", dtype='str', usecols=(0, 1, 2, 3, 4))
-test_slideFolders = np.genfromtxt("./prostate-cancer-grade-assessment/test_slideFolders.csv", delimiter=",", dtype='str', usecols=0)
-train_slideFolders = np.genfromtxt("./prostate-cancer-grade-assessment/train_slideFolders.csv", delimiter=",", dtype='str', usecols=0)
-validation_slideFolders = np.genfromtxt("./prostate-cancer-grade-assessment/validation_slideFolders.csv", delimiter=",", dtype='str', usecols=0)
-kaggle_remove_ka_slideFolders = np.genfromtxt("./prostate-cancer-grade-assessment/kaggle_remove_ka_slideFolders.csv", delimiter=",", dtype='str', usecols=0)
-
+# Each slide has three levels opened by openslide: 0, 1 & 2. 
+# 0 is too small and 2 is too large
 level = 1
-sz = 128
-tile_size = 126
-overlap = int((sz - tile_size) / 2)
-# f = open("./prostate-cancer-grade-assessment/train_slideFolders_classification_tilesize_126.csv", "a+", newline="")
-# f = open("./prostate-cancer-grade-assessment/validation_slideFolders_classification_tilesize_126.csv", "a+", newline="")
-# f = open("./prostate-cancer-grade-assessment/test_slideFolders_classification_tilesize_126.csv", "a+", newline="")
-f = open("./prostate-cancer-grade-assessment/kaggle_remove_ka_slideFolders_classification_tilesize_126.csv", "a+", newline="")
+sz = 128 # Don't change it. Size of each patch.
+
+# Size of squares to be colored. Lower it can increase resolution but takes a
+# lot more time and memory to compute.
+tile_size = 40
+overlap = int((sz - tile_size) / 2) # Size of overlapping areas between patches
+f = open(output_path, "a+", newline="") # Open a csv file descriptor
 wr = csv.writer(f)
 
-# for kaggle_remove_ka_slideFolders_idx in trange(len(kaggle_remove_ka_slideFolders)):
-# for train_slideFolders_idx in trange(len(train_slideFolders)):
-# for validation_slideFolders_idx in trange(len(validation_slideFolders)):
-# for test_slideFolders_idx in trange(len(test_slideFolders)):
-for kaggle_remove_ka_slideFolders_idx in trange(1000, len(kaggle_remove_ka_slideFolders)):
-# for train_slideFolders_idx in trange(0, 2):
-# for validation_slideFolders_idx in range(0, 1):
-# for test_slideFolders_idx in range(531, 533):
+for test_slideFolders_idx in trange(len(test_slideFolders)):
     for new_train_idx in range(len(train_image_id)):
-        if kaggle_remove_ka_slideFolders[kaggle_remove_ka_slideFolders_idx] in train_image_id[new_train_idx]:
-        # if train_slideFolders[train_slideFolders_idx] in train_image_id[new_train_idx]:
-        # if validation_slideFolders[validation_slideFolders_idx] in train_image_id[new_train_idx]:
-        # if test_slideFolders[test_slideFolders_idx] in train_image_id[new_train_idx]:
+        if test_slideFolders[test_slideFolders_idx] in train_image_id[new_train_idx]:
             # H&E
             im = openslide.OpenSlide(images_path + train_image_id[new_train_idx])
             
-            # Select tiles
+            # Split into patches
             dpz = deepzoom.DeepZoomGenerator(im, tile_size=tile_size, overlap=overlap, limit_bounds=False)
 
             width = dpz.level_tiles[dpz.level_count - 3][0]
@@ -240,24 +274,27 @@ for kaggle_remove_ka_slideFolders_idx in trange(1000, len(kaggle_remove_ka_slide
             
             im.close()
             
+            # Filter empty patches
             temp_idx_list = []
             for p in tiles1:
-                if p.sum() < (12533760 * 0.85):
+                # Select tiles with cells based on sum of pixels
+                # 0.85: lower it can increase the amount of patches being classified
+                if p.sum() < (255 * 3 * 128 * 128 * 0.85):
                     temp_idx_list.append(True)
                 else:
                     temp_idx_list.append(False)
             
-            # DT
-            predicted_mask_data_DT = [0] * len(temp_idx_list)
-            temp_predicted_mask_data_DT, temp_predicted_mask_data_DT_magnitude = DT(tiles1[temp_idx_list] / 255.0)
-            temp_predicted_mask_data_DT += 1
+            # Get decision flow results
+            predicted_mask_data_DF = [0] * len(temp_idx_list)
+            temp_predicted_mask_data_DF, temp_predicted_mask_data_DF_magnitude = DF(tiles1[temp_idx_list] / 255.0)
+            temp_predicted_mask_data_DF += 1
             count = 0
-            for temp_idx in range(len(predicted_mask_data_DT)):
+            for temp_idx in range(len(predicted_mask_data_DF)):
                 if temp_idx_list[temp_idx] == True:
-                    predicted_mask_data_DT[temp_idx] = temp_predicted_mask_data_DT[count]
+                    predicted_mask_data_DF[temp_idx] = temp_predicted_mask_data_DF[count]
                     count += 1
             
-            # MC
+            # Get multi-class results
             predicted_mask_data_MC = [0] * len(temp_idx_list)
             temp_predicted_mask_data_MC, temp_predicted_mask_data_MC_magnitude = MC(tiles1[temp_idx_list] / 255.0)
             temp_predicted_mask_data_MC += 1
@@ -266,129 +303,9 @@ for kaggle_remove_ka_slideFolders_idx in trange(1000, len(kaggle_remove_ka_slide
                 if temp_idx_list[temp_idx] == True:
                     predicted_mask_data_MC[temp_idx] = temp_predicted_mask_data_MC[count]
                     count += 1
-            
-            # Extract DT features
-            temp1 = 0
-            temp2 = 0
-            temp3 = 0
-            temp4 = 0
-            temp5 = 0
-            count = 0
-            for i in predicted_mask_data_DT:
-                if i == 1:
-                    temp1 += temp_predicted_mask_data_DT_magnitude[count]
-                elif i == 2:
-                    temp2 += temp_predicted_mask_data_DT_magnitude[count]
-                elif i == 3:
-                    temp3 += temp_predicted_mask_data_DT_magnitude[count]
-                elif i == 4:
-                    temp4 += temp_predicted_mask_data_DT_magnitude[count]
-                elif i == 5:
-                    temp5 += temp_predicted_mask_data_DT_magnitude[count]
-                
-                if i != 0:
-                    count += 1
-            
-            # if np.equal(predicted_mask_data_DT, 1).sum() > 0:
-            #     temp1 = temp1 / np.equal(predicted_mask_data_DT, 1).sum()
-            # if np.equal(predicted_mask_data_DT, 2).sum() > 0:
-            #     temp2 = temp2 / np.equal(predicted_mask_data_DT, 2).sum()
-            # if np.equal(predicted_mask_data_DT, 3).sum() > 0:
-            #     temp3 = temp3 / np.equal(predicted_mask_data_DT, 3).sum()
-            # if np.equal(predicted_mask_data_DT, 4).sum() > 0:
-            #     temp4 = temp4 / np.equal(predicted_mask_data_DT, 4).sum()
-            # if np.equal(predicted_mask_data_DT, 5).sum() > 0:
-            #     temp5 = temp5 / np.equal(predicted_mask_data_DT, 5).sum()
-            
-            unique_DT = np.unique(predicted_mask_data_DT, return_counts=True)
-            # length = np.sum(temp_idx_list)
-            temp_list_DT = [0, 0, 0, 0, 0, temp1, temp2, temp3, temp4, temp5]
-            for temp_idx in range(len(unique_DT[0])):
-                # if int(unique_DT[0][temp_idx]) == 1:
-                #     temp_list_DT[0] = unique_DT[1][temp_idx] / length
-                # if int(unique_DT[0][temp_idx]) == 2:
-                #     temp_list_DT[1] = unique_DT[1][temp_idx] / length
-                # if int(unique_DT[0][temp_idx]) == 3:
-                #     temp_list_DT[2] = unique_DT[1][temp_idx] / length
-                # if int(unique_DT[0][temp_idx]) == 4:
-                #     temp_list_DT[3] = unique_DT[1][temp_idx] / length
-                # if int(unique_DT[0][temp_idx]) == 5:
-                #     temp_list_DT[4] = unique_DT[1][temp_idx] / length
-                if int(unique_DT[0][temp_idx]) == 1:
-                    temp_list_DT[0] = unique_DT[1][temp_idx]
-                if int(unique_DT[0][temp_idx]) == 2:
-                    temp_list_DT[1] = unique_DT[1][temp_idx]
-                if int(unique_DT[0][temp_idx]) == 3:
-                    temp_list_DT[2] = unique_DT[1][temp_idx]
-                if int(unique_DT[0][temp_idx]) == 4:
-                    temp_list_DT[3] = unique_DT[1][temp_idx]
-                if int(unique_DT[0][temp_idx]) == 5:
-                    temp_list_DT[4] = unique_DT[1][temp_idx]
-            
-            x_list_DT = temp_list_DT
-            y_list_DT = [train_image_fullInfo[new_train_idx][4]]
-            
-            # Extract MC features
-            temp1 = 0
-            temp2 = 0
-            temp3 = 0
-            temp4 = 0
-            temp5 = 0
-            count = 0
-            for i in predicted_mask_data_MC:
-                if i == 1:
-                    temp1 += temp_predicted_mask_data_MC_magnitude[count]
-                elif i == 2:
-                    temp2 += temp_predicted_mask_data_MC_magnitude[count]
-                elif i == 3:
-                    temp3 += temp_predicted_mask_data_MC_magnitude[count]
-                elif i == 4:
-                    temp4 += temp_predicted_mask_data_MC_magnitude[count]
-                elif i == 5:
-                    temp5 += temp_predicted_mask_data_MC_magnitude[count]
-                
-                if i != 0:
-                    count += 1
-            
-            # if np.equal(predicted_mask_data_MC, 1).sum() > 0:
-            #     temp1 = temp1 / np.equal(predicted_mask_data_MC, 1).sum()
-            # if np.equal(predicted_mask_data_MC, 2).sum() > 0:
-            #     temp2 = temp2 / np.equal(predicted_mask_data_MC, 2).sum()
-            # if np.equal(predicted_mask_data_MC, 3).sum() > 0:
-            #     temp3 = temp3 / np.equal(predicted_mask_data_MC, 3).sum()
-            # if np.equal(predicted_mask_data_MC, 4).sum() > 0:
-            #     temp4 = temp4 / np.equal(predicted_mask_data_MC, 4).sum()
-            # if np.equal(predicted_mask_data_MC, 5).sum() > 0:
-            #     temp5 = temp5 / np.equal(predicted_mask_data_MC, 5).sum()
-            
-            unique_MC = np.unique(predicted_mask_data_MC, return_counts=True)
-            temp_list_MC = [0, 0, 0, 0, 0, temp1, temp2, temp3, temp4, temp5]
-            for temp_idx in range(len(unique_MC[0])):
-                # if int(unique_MC[0][temp_idx]) == 1:
-                #     temp_list_MC[0] = unique_MC[1][temp_idx] / length
-                # if int(unique_MC[0][temp_idx]) == 2:
-                #     temp_list_MC[1] = unique_MC[1][temp_idx] / length
-                # if int(unique_MC[0][temp_idx]) == 3:
-                #     temp_list_MC[2] = unique_MC[1][temp_idx] / length
-                # if int(unique_MC[0][temp_idx]) == 4:
-                #     temp_list_MC[3] = unique_MC[1][temp_idx] / length
-                # if int(unique_MC[0][temp_idx]) == 5:
-                #     temp_list_MC[4] = unique_MC[1][temp_idx] / length
-                if int(unique_MC[0][temp_idx]) == 1:
-                    temp_list_MC[0] = unique_MC[1][temp_idx]
-                if int(unique_MC[0][temp_idx]) == 2:
-                    temp_list_MC[1] = unique_MC[1][temp_idx]
-                if int(unique_MC[0][temp_idx]) == 3:
-                    temp_list_MC[2] = unique_MC[1][temp_idx]
-                if int(unique_MC[0][temp_idx]) == 4:
-                    temp_list_MC[3] = unique_MC[1][temp_idx]
-                if int(unique_MC[0][temp_idx]) == 5:
-                    temp_list_MC[4] = unique_MC[1][temp_idx]
-            
-            x_list_MC = temp_list_MC
 
-            # slideFolders_classification = x_list_DT + x_list_MC + y_list_DT
-            slideFolders_classification = temp_predicted_mask_data_DT.tolist() + temp_predicted_mask_data_DT_magnitude.tolist() + temp_predicted_mask_data_MC.tolist() + temp_predicted_mask_data_MC_magnitude.tolist() + y_list_DT
+            # Output to the csv file
+            slideFolders_classification = temp_predicted_mask_data_DF.tolist() + temp_predicted_mask_data_DF_magnitude.tolist() + temp_predicted_mask_data_MC.tolist() + temp_predicted_mask_data_MC_magnitude.tolist() + y_list_DF
             wr.writerow(slideFolders_classification)
             break
 
