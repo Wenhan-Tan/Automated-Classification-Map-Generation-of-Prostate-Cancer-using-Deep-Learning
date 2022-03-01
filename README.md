@@ -15,5 +15,3 @@ All 7 scripts have detailed header if you want to know more about how each scrip
 [https://drive.google.com/drive/folders/1VAiGVo2SAn6-KJ2lQw68bYxyKUZLlCWq?usp=sharing](https://drive.google.com/drive/folders/1VAiGVo2SAn6-KJ2lQw68bYxyKUZLlCWq?usp=sharing)
 ## Dataset:
 [https://www.kaggle.com/c/prostate-cancer-grade-assessment/data](https://www.kaggle.com/c/prostate-cancer-grade-assessment/data)
-## My Email:
-wenhan.johnson.tan@hotmail.com
